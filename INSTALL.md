@@ -9,7 +9,7 @@ Claudeでピラティススタジオを検索できるようにするツール�
 ターミナルを開いて、以下をコピー＆ペーストして Enter キーを押してください：
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/あなたのユーザー名/pilates-mcp-server/main/install.sh | bash
+curl -sSL https://raw.githubusercontent.com/Readify-App/pilates-mcp-server/main/install.sh | bash
 ```
 
 ### Windows
@@ -17,7 +17,7 @@ curl -sSL https://raw.githubusercontent.com/あなたのユーザー名/pilates-
 PowerShellを**管理者権限なしで**開いて、以下をコピー＆ペーストして Enter キーを押してください：
 
 ```powershell
-irm https://raw.githubusercontent.com/あなたのユーザー名/pilates-mcp-server/main/install.ps1 | iex
+irm https://raw.githubusercontent.com/Readify-App/pilates-mcp-server/main/install.ps1 | iex
 ```
 
 ## ✅ インストール後
@@ -31,7 +31,7 @@ irm https://raw.githubusercontent.com/あなたのユーザー名/pilates-mcp-se
 
 1. Claude Desktopを完全に終了して、もう一度起動してみてください
 2. ターミナル（またはPowerShell）を再起動してから、インストールコマンドを再実行してください
-3. それでも動かない場合は [Issues](https://github.com/あなたのユーザー名/pilates-mcp-server/issues) で質問してください
+3. それでも動かない場合は [Issues](https://github.com/Readify-App/pilates-mcp-server/issues) で質問してください
 
 ## 🗑️ アンインストール方法
 
@@ -71,4 +71,4 @@ Claudeに以下のように話しかけてください：
 
 ## 📧 サポート
 
-質問や問題がある場合は [Issues](https://github.com/あなたのユーザー名/pilates-mcp-server/issues) でお知らせください。
+質問や問題がある場合は [Issues](https://github.com/Readify-App/pilates-mcp-server/issues) でお知らせください。

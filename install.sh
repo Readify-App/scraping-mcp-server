@@ -29,7 +29,7 @@ if ! command -v jq &> /dev/null; then
         echo "👉 https://brew.sh からHomebrewをインストールしてください"
         echo ""
         echo "Homebrewインストール後、再度このスクリプトを実行してください："
-        echo "curl -sSL https://raw.githubusercontent.com/あなたのユーザー名/pilates-mcp-server/main/install.sh | bash"
+        echo "curl -sSL https://raw.githubusercontent.com/Readify-App/pilates-mcp-server/main/install.sh | bash"
         exit 1
     fi
 else
