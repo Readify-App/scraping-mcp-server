@@ -56,7 +56,7 @@ fi
 echo "MCPサーバーを設定ファイルに追加しています..."
 jq '.mcpServers["pilates-finder"] = {
   "command": "uvx",
-  "args": ["pilates-mcp-server"]
+  "args": ["--from", "git+https://github.com/Readify-App/pilates-mcp-server.git", "pilates-mcp-server"]
 }' "$CONFIG_FILE" > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "$CONFIG_FILE"
 
 echo "✅ 設定ファイルを更新しました"

@@ -38,7 +38,7 @@ if (!$config.mcpServers) {
 
 $config.mcpServers | Add-Member -NotePropertyName "pilates-finder" -NotePropertyValue @{
     command = "uvx"
-    args = @("pilates-mcp-server")
+    args = @("--from", "git+https://github.com/Readify-App/pilates-mcp-server.git", "pilates-mcp-server")
 } -Force
 
 $config | ConvertTo-Json -Depth 10 | Set-Content $configPath -Encoding UTF8
