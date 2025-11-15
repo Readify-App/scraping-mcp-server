@@ -1,0 +1,17 @@
+[project]
+name = "pilates-mcp-server"
+version = "0.1.0"
+description = "ピラティススタジオ情報を取得するMCPサーバー"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "httpx>=0.28.1",
+    "mcp>=1.20.0",
+]
+
+[project.scripts]
+pilates-mcp-server = "server:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
