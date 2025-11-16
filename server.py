@@ -4,6 +4,7 @@
 import logging
 import asyncio
 import json
+from pathlib import Path
 from urllib.parse import urljoin, urlparse
 from typing import List
 from bs4 import BeautifulSoup
@@ -20,12 +21,18 @@ except ImportError:
     async_playwright = None
     PLAYWRIGHT_AVAILABLE = False
 
+# ログファイルのパスを動的に決定（スクリプトのディレクトリに保存）
+_log_dir = Path(__file__).parent
+_log_file = _log_dir / 'debug.log'
+# ディレクトリが存在しない場合は作成
+_log_dir.mkdir(parents=True, exist_ok=True)
+
 # ログ設定
 logging.basicConfig(
     level=logging.DEBUG,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('/Users/yuta/Desktop/02_開発/scraping-mcp-server/debug.log'),
+        logging.FileHandler(str(_log_file)),
         logging.StreamHandler()
     ]
 )
