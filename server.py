@@ -4,9 +4,10 @@
 import logging
 import asyncio
 import json
+import re
 from pathlib import Path
 from urllib.parse import urljoin, urlparse
-from typing import List
+from typing import Any, Dict, List
 from bs4 import BeautifulSoup
 from bs4.element import Tag
 from mcp.server.fastmcp import FastMCP
@@ -41,6 +42,11 @@ logger = logging.getLogger(__name__)
 # ブラウザ数制限
 MAX_BROWSERS = 5
 browser_semaphore = asyncio.Semaphore(MAX_BROWSERS)
+
+CLOUD_GYM_BASE_URL = "https://cloud-gym.com/personal-fitness"
+CLOUD_GYM_POST_TYPE = "introduce"
+CLOUD_GYM_API_ENDPOINT = f"{CLOUD_GYM_BASE_URL.rstrip('/')}/wp-json/wp/v2/{CLOUD_GYM_POST_TYPE}"
+CLOUD_GYM_DEFAULT_FIELDS = "id,title,excerpt,date,link,slug"
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # MCPサーバー作成
@@ -1009,6 +1015,538 @@ async def extract_site_links_with_playwright(url: str) -> str:
                     await asyncio.sleep(1)
             except:
                 pass
+
+
+@mcp.tool()
+async def search_cloud_gym_introduce(
+    keyword: str,
+    per_page: int = 20,
+    page: int = 1,
+    include_terms: bool = False,
+) -> str:
+    """
+    Cloud GYMサイトのintroduce投稿を検索するツール。
+
+    Args:
+        keyword: WordPress REST APIのsearchパラメータに渡すキーワード
+        per_page: 取得件数 (1-100)
+        page: ページ番号 (1以上)
+        include_terms: タクソノミー情報を含めるかどうか
+
+    Returns:
+        結果を表すJSON文字列
+    """
+    if not keyword:
+        return json.dumps(
+            {
+                "success": False,
+                "error": "keyword_required",
+                "message": "検索キーワードを指定してください。",
+            },
+            ensure_ascii=False,
+        )
+
+    per_page = max(1, min(per_page, 100))
+    page = max(1, page)
+
+    params: Dict[str, Any] = {
+        "search": keyword,
+        "per_page": per_page,
+        "page": page,
+        "status": "publish",
+        "_fields": CLOUD_GYM_DEFAULT_FIELDS,
+    }
+
+    if include_terms:
+        params["_embed"] = ""
+        if "_embedded" not in params["_fields"]:
+            params["_fields"] = f"{params['_fields']},_embedded"
+
+    logger.info(
+        "[CloudGym] introduce検索: %s (page=%s, per_page=%s)",
+        keyword,
+        page,
+        per_page,
+    )
+    logger.debug("[CloudGym] params=%s", params)
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(CLOUD_GYM_API_ENDPOINT, params=params) as response:
+                if response.status == 200:
+                    raw_posts = await response.json()
+                    total_posts = response.headers.get("X-WP-Total", "unknown")
+                    total_pages = response.headers.get("X-WP-TotalPages", "unknown")
+
+                    result: Dict[str, Any] = {
+                        "success": True,
+                        "site": CLOUD_GYM_BASE_URL,
+                        "post_type": CLOUD_GYM_POST_TYPE,
+                        "search_keyword": keyword,
+                        "count": len(raw_posts),
+                        "pagination": {
+                            "current_page": page,
+                            "per_page": per_page,
+                            "total_posts": total_posts,
+                            "total_pages": total_pages,
+                        },
+                        "posts": _cloud_gym_normalize_posts(raw_posts),
+                    }
+
+                    if include_terms:
+                        taxonomy_terms = _cloud_gym_extract_taxonomy_terms(raw_posts)
+                        if taxonomy_terms:
+                            result["taxonomy_terms"] = taxonomy_terms
+
+                    logger.info("[CloudGym] introduce取得: %s件", len(raw_posts))
+                    return json.dumps(result, ensure_ascii=False, indent=2)
+
+                error_payload = await _cloud_gym_extract_error_payload(response)
+                logger.error(
+                    "[CloudGym] APIエラー (%s): %s", response.status, error_payload
+                )
+                return json.dumps(
+                    {
+                        "success": False,
+                        "error": "api_error",
+                        "status": response.status,
+                        "details": error_payload,
+                    },
+                    ensure_ascii=False,
+                )
+
+    except aiohttp.ClientError as exc:
+        logger.error("[CloudGym] ネットワークエラー: %s", exc)
+        return json.dumps(
+            {
+                "success": False,
+                "error": "network_error",
+                "message": f"ネットワークエラーが発生しました: {str(exc)}",
+            },
+            ensure_ascii=False,
+        )
+    except Exception as exc:
+        logger.exception("[CloudGym] 予期しないエラー: %s", exc)
+        return json.dumps(
+            {
+                "success": False,
+                "error": "unexpected_error",
+                "message": f"予期しないエラーが発生しました: {str(exc)}",
+            },
+            ensure_ascii=False,
+        )
+
+
+@mcp.tool()
+async def search_cloud_gym_posts(
+    keyword: str = "",
+    per_page: int = 20,
+    page: int = 1,
+    include_terms: bool = False,
+) -> str:
+    """
+    Cloud GYMサイトの通常の投稿（posts）を検索・取得するツール。
+    カスタム投稿タイプではなく、WordPressの標準投稿を対象とします。
+
+    Args:
+        keyword: WordPress REST APIのsearchパラメータに渡すキーワード（空文字列の場合は全件取得）
+        per_page: 取得件数 (1-100)
+        page: ページ番号 (1以上)
+        include_terms: タクソノミー情報（カテゴリー、タグなど）を含めるかどうか
+
+    Returns:
+        結果を表すJSON文字列
+    """
+    per_page = max(1, min(per_page, 100))
+    page = max(1, page)
+
+    # 通常の投稿用のエンドポイント
+    posts_endpoint = f"{CLOUD_GYM_BASE_URL.rstrip('/')}/wp-json/wp/v2/posts"
+
+    params: Dict[str, Any] = {
+        "per_page": per_page,
+        "page": page,
+        "status": "publish",
+        "_fields": CLOUD_GYM_DEFAULT_FIELDS,
+    }
+
+    # キーワードが指定されている場合のみsearchパラメータを追加
+    if keyword:
+        params["search"] = keyword
+
+    if include_terms:
+        params["_embed"] = ""
+        if "_embedded" not in params["_fields"]:
+            params["_fields"] = f"{params['_fields']},_embedded"
+
+    logger.info(
+        "[CloudGym] posts検索: %s (page=%s, per_page=%s)",
+        keyword or "全件",
+        page,
+        per_page,
+    )
+    logger.debug("[CloudGym] params=%s", params)
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(posts_endpoint, params=params) as response:
+                if response.status == 200:
+                    raw_posts = await response.json()
+                    total_posts = response.headers.get("X-WP-Total", "unknown")
+                    total_pages = response.headers.get("X-WP-TotalPages", "unknown")
+
+                    result: Dict[str, Any] = {
+                        "success": True,
+                        "site": CLOUD_GYM_BASE_URL,
+                        "post_type": "posts",
+                        "search_keyword": keyword or None,
+                        "count": len(raw_posts),
+                        "pagination": {
+                            "current_page": page,
+                            "per_page": per_page,
+                            "total_posts": total_posts,
+                            "total_pages": total_pages,
+                        },
+                        "posts": _cloud_gym_normalize_posts(raw_posts),
+                    }
+
+                    if include_terms:
+                        taxonomy_terms = _cloud_gym_extract_taxonomy_terms(raw_posts)
+                        if taxonomy_terms:
+                            result["taxonomy_terms"] = taxonomy_terms
+
+                    logger.info("[CloudGym] posts取得: %s件", len(raw_posts))
+                    return json.dumps(result, ensure_ascii=False, indent=2)
+
+                error_payload = await _cloud_gym_extract_error_payload(response)
+                logger.error(
+                    "[CloudGym] APIエラー (%s): %s", response.status, error_payload
+                )
+                return json.dumps(
+                    {
+                        "success": False,
+                        "error": "api_error",
+                        "status": response.status,
+                        "details": error_payload,
+                    },
+                    ensure_ascii=False,
+                )
+
+    except aiohttp.ClientError as exc:
+        logger.error("[CloudGym] ネットワークエラー: %s", exc)
+        return json.dumps(
+            {
+                "success": False,
+                "error": "network_error",
+                "message": f"ネットワークエラーが発生しました: {str(exc)}",
+            },
+            ensure_ascii=False,
+        )
+    except Exception as exc:
+        logger.exception("[CloudGym] 予期しないエラー: %s", exc)
+        return json.dumps(
+            {
+                "success": False,
+                "error": "unexpected_error",
+                "message": f"予期しないエラーが発生しました: {str(exc)}",
+            },
+            ensure_ascii=False,
+        )
+
+
+def _cloud_gym_normalize_posts(posts: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    normalized = []
+    for post in posts:
+        normalized.append(
+            {
+                "id": post.get("id"),
+                "title": _cloud_gym_extract_text_field(post.get("title")),
+                "excerpt": _cloud_gym_extract_text_field(post.get("excerpt")),
+                "date": post.get("date"),
+                "link": post.get("link"),
+                "slug": post.get("slug"),
+            }
+        )
+    return normalized
+
+
+def _cloud_gym_extract_text_field(field: Any) -> str:
+    if isinstance(field, dict):
+        return field.get("rendered") or field.get("raw") or ""
+    if isinstance(field, str):
+        return field
+    return ""
+
+
+def _cloud_gym_extract_taxonomy_terms(posts: List[Dict[str, Any]]) -> Dict[str, Any]:
+    taxonomy_terms: Dict[str, Dict[int, Dict[str, Any]]] = {}
+
+    for post in posts:
+        embedded_terms = post.get("_embedded", {}).get("wp:term", [])
+        for term_group in embedded_terms:
+            for term in term_group:
+                taxonomy = term.get("taxonomy")
+                term_id = term.get("id")
+                if taxonomy and term_id is not None:
+                    taxonomy_terms.setdefault(taxonomy, {})
+                    if term_id not in taxonomy_terms[taxonomy]:
+                        taxonomy_terms[taxonomy][term_id] = {
+                            "id": term_id,
+                            "name": term.get("name", ""),
+                            "slug": term.get("slug", ""),
+                            "description": term.get("description", ""),
+                            "count": term.get("count", 0),
+                        }
+
+    result: Dict[str, Any] = {}
+    for taxonomy, terms in taxonomy_terms.items():
+        result[taxonomy] = {
+            "total": len(terms),
+            "terms": list(terms.values()),
+        }
+    return result
+
+
+async def _cloud_gym_extract_error_payload(response: aiohttp.ClientResponse) -> Any:
+    try:
+        return await response.json()
+    except aiohttp.ContentTypeError:
+        return await response.text()
+
+
+@mcp.tool()
+async def extract_store_ids_from_post(url: str) -> str:
+    """
+    Cloud GYMの投稿ページからパーソナルジムのストアID（store_XX形式）を抽出します。
+    投稿本文を読み込んで、id属性が"store_"で始まる要素を探します。
+
+    Args:
+        url: 投稿のURL（例：「https://cloud-gym.com/personal-fitness/archives/575」）
+
+    Returns:
+        抽出されたストアIDとアンカーリンク付きURLのJSON文字列
+    """
+    logger.info(f"extract_store_ids_from_post called with url={url}")
+    
+    try:
+        # 投稿ページのHTMLを取得
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/120.0.0.0 Safari/537.36"
+            ),
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+            "Accept-Language": "ja,en-US;q=0.7,en;q=0.3",
+        }
+        
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, headers=headers, timeout=ClientTimeout(total=20)) as response:
+                if response.status != 200:
+                    error_msg = f"Failed to fetch page: {response.status}"
+                    logger.error(error_msg)
+                    return json.dumps({
+                        "success": False,
+                        "error": error_msg,
+                        "url": url,
+                        "store_ids": [],
+                        "anchor_urls": []
+                    }, ensure_ascii=False)
+                
+                html = await response.text()
+                soup = BeautifulSoup(html, "html.parser")
+                
+                # store_で始まるIDを持つ要素を探す
+                store_ids = set()
+                
+                # 1. id属性が"store_"で始まる要素を探す
+                for element in soup.find_all(id=re.compile(r'^store_\d+$')):
+                    store_id = element.get('id', '')
+                    if store_id:
+                        store_ids.add(store_id)
+                
+                # 2. class属性に"store_"を含む要素も探す（フォールバック）
+                for element in soup.find_all(class_=re.compile(r'store_\d+')):
+                    classes = element.get('class', [])
+                    for cls in classes:
+                        match = re.search(r'store_(\d+)', cls)
+                        if match:
+                            store_ids.add(f"store_{match.group(1)}")
+                
+                # 3. データ属性からも探す
+                for element in soup.find_all(attrs={'data-store-id': True}):
+                    store_id_attr = element.get('data-store-id', '')
+                    if store_id_attr:
+                        if not store_id_attr.startswith('store_'):
+                            store_ids.add(f"store_{store_id_attr}")
+                        else:
+                            store_ids.add(store_id_attr)
+                
+                # アンカーリンク付きURLを生成
+                anchor_urls = []
+                for store_id in sorted(store_ids):
+                    anchor_urls.append(f"{url}#{store_id}")
+                
+                logger.info(f"Extracted {len(store_ids)} store IDs from {url}")
+                
+                result = {
+                    "success": True,
+                    "url": url,
+                    "store_ids": sorted(list(store_ids)),
+                    "anchor_urls": anchor_urls,
+                    "count": len(store_ids)
+                }
+                
+                return json.dumps(result, ensure_ascii=False, indent=2)
+                
+    except Exception as e:
+        logger.exception(f"Error in extract_store_ids_from_post: {e}")
+        return json.dumps({
+            "success": False,
+            "error": str(e),
+            "url": url,
+            "store_ids": [],
+            "anchor_urls": []
+        }, ensure_ascii=False)
+
+
+@mcp.tool()
+async def generate_gym_introduction_email(
+    region: str,
+    per_page: int = 50,
+    max_posts: int = 10
+) -> str:
+    """
+    指定された地域のパーソナルジム投稿を検索し、メールテンプレートを生成します。
+    投稿本文を読み込んで実際にパーソナルジムが存在することを確認し、
+    アンカーリンク付きURLを生成してメールテンプレートに埋め込みます。
+
+    Args:
+        region: 検索する地域名（例：「東京」「大阪」「横浜」）
+        per_page: 1回の検索で取得する件数 (1-100)
+        max_posts: 処理する最大投稿数（実際にパーソナルジムが存在する投稿のみ）
+
+    Returns:
+        メールテンプレートと処理結果のJSON文字列
+    """
+    logger.info(f"generate_gym_introduction_email called with region={region}")
+    
+    per_page = max(1, min(per_page, 100))
+    max_posts = max(1, max_posts)
+    
+    try:
+        # 1. 地域名で投稿を検索
+        posts_endpoint = f"{CLOUD_GYM_BASE_URL.rstrip('/')}/wp-json/wp/v2/posts"
+        params = {
+            "search": region,
+            "per_page": per_page,
+            "page": 1,
+            "status": "publish",
+            "_fields": CLOUD_GYM_DEFAULT_FIELDS,
+        }
+        
+        async with aiohttp.ClientSession() as session:
+            async with session.get(posts_endpoint, params=params) as response:
+                if response.status != 200:
+                    error_msg = f"Failed to fetch posts: {response.status}"
+                    logger.error(error_msg)
+                    return json.dumps({
+                        "success": False,
+                        "error": error_msg,
+                        "region": region
+                    }, ensure_ascii=False)
+                
+                raw_posts = await response.json()
+                logger.info(f"Found {len(raw_posts)} posts for region: {region}")
+        
+        # 2. 各投稿からストアIDを抽出
+        valid_posts = []
+        processed_count = 0
+        
+        for post in raw_posts:
+            if processed_count >= max_posts:
+                break
+            
+            post_link = post.get("link", "")
+            if not post_link:
+                continue
+            
+            # 投稿からストアIDを抽出
+            store_result_json = await extract_store_ids_from_post(post_link)
+            store_result = json.loads(store_result_json)
+            
+            if store_result.get("success") and store_result.get("store_ids"):
+                # パーソナルジムが実際に存在する投稿
+                valid_posts.append({
+                    "title": _cloud_gym_extract_text_field(post.get("title")),
+                    "url": post_link,
+                    "store_ids": store_result.get("store_ids", []),
+                    "anchor_urls": store_result.get("anchor_urls", [])
+                })
+                processed_count += 1
+                logger.info(f"Valid post found: {post_link} ({len(store_result.get('store_ids', []))} stores)")
+        
+        # 3. メールテンプレートを生成
+        if not valid_posts:
+            return json.dumps({
+                "success": False,
+                "error": "no_valid_posts",
+                "message": f"地域「{region}」でパーソナルジムが存在する投稿が見つかりませんでした。",
+                "region": region,
+                "searched_posts": len(raw_posts)
+            }, ensure_ascii=False, indent=2)
+        
+        # アンカーリンク付きURLを収集
+        all_anchor_urls = []
+        for post_info in valid_posts:
+            all_anchor_urls.extend(post_info["anchor_urls"])
+        
+        # メールテンプレート
+        url_section = "\n".join(all_anchor_urls)
+        
+        email_template = f"""突然のご連絡失礼いたします。
+パーソナルジム比較メディア「personal-fitness」（https://cloud-gym.com/personal-fitness/）を運営しております株式会社Buildsの金藤優太と申します。
+
+「personal-fitness」では、メディア立ち上げから順調にPV数を伸ばしており、全国のジム・パーソナルジム5,000店舗以上を紹介しているメディアとなります。
+
+事後のご連絡となってしまい大変恐縮ですが、この度、弊社メディアにて貴社パーソナルジムをおすすめパーソナルジムとしてご紹介させていただきましたのでご連絡いたしました。
+
+＝＝＝＝＝＝＝＝＝＝＝＝
+▼この度、貴社パーソナルジムをご紹介させていただいた記事▼
+{url_section}
+＝＝＝＝＝＝＝＝＝＝＝＝
+
+メディア掲載実績として貴社サイトにて記事をご紹介頂くことは可能でしょうか？
+
+参考までに、他社様での掲載事例を以下にお示しいたします。
+https://evigym.com/news/media-personal-fitness
+https://corp.azure-collaboration.co.jp/media-personal-fitness/
+
+また、記事内容に関するお問い合わせなどございましたら、ご回答させていただきますため、ご連絡していただけますと幸いです。
+
+不躾なご連絡となり恐れ入りますが、今後ともpersonal-fitnessを何卒よろしくお願いいたします。"""
+        
+        result = {
+            "success": True,
+            "region": region,
+            "searched_posts": len(raw_posts),
+            "valid_posts": len(valid_posts),
+            "total_stores": sum(len(p["store_ids"]) for p in valid_posts),
+            "posts": valid_posts,
+            "email_template": email_template,
+            "anchor_urls": all_anchor_urls
+        }
+        
+        logger.info(f"Generated email template for {len(valid_posts)} posts in {region}")
+        return json.dumps(result, ensure_ascii=False, indent=2)
+        
+    except Exception as e:
+        logger.exception(f"Error in generate_gym_introduction_email: {e}")
+        return json.dumps({
+            "success": False,
+            "error": str(e),
+            "region": region
+        }, ensure_ascii=False)
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
