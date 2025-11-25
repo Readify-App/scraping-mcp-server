@@ -56,6 +56,8 @@ RAKURAKU_API_BASE = f"{RAKURAKU_SITE_URL.rstrip('/')}/wp-json/wp/v2"
 RAKURAKU_DEFAULT_FIELDS = "id,title,slug,date,link,status"
 RAKURAKU_WP_USERNAME = "rakuraku-admin-school"
 RAKURAKU_WP_APP_PASSWORD = "ajBN QdvS fPGS 0L9O SkeV CgVJ"
+RAKURAKU_FIELD_CONTAINERS = {"custom_fields", "meta", "acf"}
+RAKURAKU_ALLOWED_STATUSES = ["publish", "draft"]
 
 
 def _rakuraku_credentials_ready() -> bool:
@@ -207,7 +209,7 @@ async def _rakuraku_wp_get(path: str, params: Optional[Dict[str, Any]] = None) -
 
 
 async def _rakuraku_find_post(identifier: str) -> Optional[Dict[str, Any]]:
-    params = {"context": "edit"}
+    params = {"context": "edit", "status": ",".join(RAKURAKU_ALLOWED_STATUSES)}
     
     if identifier.isdigit():
         path = f"{RAKURAKU_POST_TYPE}/{identifier}"
@@ -228,6 +230,127 @@ async def _rakuraku_find_post(identifier: str) -> Optional[Dict[str, Any]]:
         return posts[0]
     
     return None
+
+
+async def _rakuraku_wp_post(path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    if not _rakuraku_credentials_ready():
+        raise RuntimeError(_rakuraku_missing_credentials_message())
+    
+    url = path
+    if not url.startswith("http"):
+        url = f"{RAKURAKU_API_BASE.rstrip('/')}/{path.lstrip('/')}"
+    
+    auth = BasicAuth(RAKURAKU_WP_USERNAME, RAKURAKU_WP_APP_PASSWORD)
+    timeout = ClientTimeout(total=30)
+    
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with session.post(url, json=payload, auth=auth) as response:
+            try:
+                payload_resp = await response.json(content_type=None)
+            except Exception:
+                payload_resp = await response.text()
+            
+            if response.status >= 400:
+                error_details = payload_resp if isinstance(payload_resp, dict) else {"message": str(payload_resp)}
+                raise RuntimeError(
+                    f"WordPress APIエラー (HTTP {response.status}): {json.dumps(error_details, ensure_ascii=False)}"
+                )
+            if isinstance(payload_resp, dict):
+                return payload_resp
+            raise RuntimeError("予期しないレスポンス形式です。JSONオブジェクトを受信できませんでした。")
+
+
+def _rakuraku_format_update_summary(
+    post: Dict[str, Any],
+    updated_fields: Dict[str, Any],
+    field_group: str
+) -> str:
+    title = _wp_extract_text(post.get("title"))
+    lines = [
+        "✅ 更新成功",
+        f"ID: {post.get('id')} / slug: {post.get('slug')}",
+        f"タイトル: {title or '(タイトル未設定)'}",
+        f"対象: {field_group}",
+        "",
+        "更新内容:"
+    ]
+    for key, value in updated_fields.items():
+        lines.append(f"  • {key}: {value}")
+    return "\n".join(lines)
+
+
+def _rakuraku_build_status_param(arg: Optional[str]) -> str:
+    tokens: List[str] = []
+    if arg:
+        tokens = [token.strip().lower() for token in arg.split(",") if token.strip()]
+    selected = [token for token in tokens if token in RAKURAKU_ALLOWED_STATUSES]
+    if not selected:
+        selected = RAKURAKU_ALLOWED_STATUSES.copy()
+    ordered_unique: List[str] = []
+    for status in selected:
+        if status not in ordered_unique:
+            ordered_unique.append(status)
+    return ",".join(ordered_unique)
+
+
+async def _rakuraku_handle_update_tool(
+    *,
+    post_type: str,
+    post_id: int,
+    fields_json: str,
+    container: str,
+    wrap_payload: bool,
+    label: str
+) -> str:
+    try:
+        data = json.loads(fields_json)
+    except json.JSONDecodeError as exc:
+        return (
+            "❌ JSONの形式に問題があります。\n"
+            f"エラー: {exc}\n"
+            "例: {\"カスタムフィールド名\": \"値\"}"
+        )
+    
+    if not isinstance(data, dict) or not data:
+        return "❌ JSONはキーと値を持つオブジェクト形式で指定してください。"
+    
+    container = (container or "custom_fields").strip()
+    wrap_payload = bool(wrap_payload)
+    
+    if wrap_payload:
+        if container not in RAKURAKU_FIELD_CONTAINERS:
+            return (
+                f"❌ container='{container}' はサポートされていません。"
+                " 使用可能: custom_fields / meta / acf"
+            )
+        payload = {container: data}
+        summary_fields = data
+        field_group = f"{label}:{container}"
+    else:
+        payload = data
+        summary_fields = data
+        field_group = f"{label}:raw"
+    
+    logger.info(
+        "[Rakuraku] 更新開始 post_type=%s id=%s container=%s wrap=%s",
+        post_type,
+        post_id,
+        container,
+        wrap_payload,
+    )
+    
+    try:
+        post = await _rakuraku_wp_post(f"{post_type}/{post_id}", payload)
+    except RuntimeError as exc:
+        logger.error(
+            "[Rakuraku] 更新失敗 post_type=%s id=%s : %s",
+            post_type,
+            post_id,
+            exc,
+        )
+        return f"❌ 更新に失敗しました。\n{exc}"
+    
+    return _rakuraku_format_update_summary(post, summary_fields, field_group)
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # MCPサーバー作成
@@ -1207,6 +1330,7 @@ async def rakuraku_school_list(
     keyword: str = "",
     per_page: int = 20,
     page: int = 1,
+    status: str = "publish,draft",
     include_custom_fields: bool = False,
 ) -> str:
     """
@@ -1217,6 +1341,7 @@ async def rakuraku_school_list(
         keyword: タイトル・本文・カスタムフィールドに対する検索語
         per_page: 取得件数 (1-100)
         page: ページ番号 (1以上)
+        status: 取得する投稿ステータス（例: "publish", "draft", "publish,draft"）
         include_custom_fields: True の場合はカスタムフィールドをプレビュー表示
     """
     logger.info(
@@ -1235,7 +1360,7 @@ async def rakuraku_school_list(
     params: Dict[str, Any] = {
         "per_page": per_page,
         "page": page,
-        "status": "publish",
+        "status": _rakuraku_build_status_param(status),
         "context": "edit",
         "orderby": "date",
         "order": "desc",
@@ -1306,7 +1431,7 @@ async def rakuraku_school_detail(identifier: str) -> str:
 async def rakuraku_media_posts(
     keyword: str = "",
     category_id: int = 0,
-    status: str = "publish",
+    status: str = "publish,draft",
     per_page: int = 20,
     page: int = 1,
     include_custom_fields: bool = False,
@@ -1317,7 +1442,7 @@ async def rakuraku_media_posts(
     Args:
         keyword: 検索語
         category_id: カテゴリーID（0で無視）
-        status: 投稿ステータス (publish, draft, pending など)
+        status: 投稿ステータス（例: "publish", "draft", "publish,draft"）
         per_page: 取得件数 (1-100)
         page: ページ番号
         include_custom_fields: カスタムフィールドをプレビュー表示するか
@@ -1327,12 +1452,12 @@ async def rakuraku_media_posts(
     
     per_page = max(1, min(per_page, 100))
     page = max(1, page)
-    status = status or "publish"
+    status_param = _rakuraku_build_status_param(status)
     
     params: Dict[str, Any] = {
         "per_page": per_page,
         "page": page,
-        "status": status,
+        "status": status_param,
         "context": "edit",
         "orderby": "date",
         "order": "desc",
@@ -1348,7 +1473,7 @@ async def rakuraku_media_posts(
         "[Rakuraku] posts 検索 keyword=%s category=%s status=%s page=%s",
         keyword,
         category_id or "any",
-        status,
+        status_param,
         page,
     )
     
@@ -1376,6 +1501,64 @@ async def rakuraku_media_posts(
         lines.append("")
     
     return "\n".join(lines).strip()
+
+
+@mcp.tool()
+async def rakuraku_update_school_fields(
+    post_id: int,
+    fields_json: str,
+    container: str = "meta",
+    wrap_payload: bool = True,
+) -> str:
+    """
+    school-list 投稿のカスタムフィールド/メタ情報を更新します。
+    
+    Args:
+        post_id: 更新対象の投稿ID
+        fields_json: {"フィールド名": "値"} 形式のJSON文字列
+        container: custom_fields / meta / acf のいずれか（wrap_payload=True の場合）
+        wrap_payload: True で JSON を container 内に包んで送信、False で JSON をそのまま送信
+    """
+    if not _rakuraku_credentials_ready():
+        return _rakuraku_missing_credentials_message()
+    
+    return await _rakuraku_handle_update_tool(
+        post_type=RAKURAKU_POST_TYPE,
+        post_id=post_id,
+        fields_json=fields_json,
+        container=container,
+        wrap_payload=wrap_payload,
+        label=RAKURAKU_POST_TYPE,
+    )
+
+
+@mcp.tool()
+async def rakuraku_update_media_fields(
+    post_id: int,
+    fields_json: str,
+    container: str = "meta",
+    wrap_payload: bool = True,
+) -> str:
+    """
+    通常投稿（/wp-admin/edit.php）に対してカスタムフィールドやメタ情報を更新します。
+    
+    Args:
+        post_id: 投稿ID
+        fields_json: {"フィールド名": "値"} 形式のJSON文字列
+        container: custom_fields / meta / acf （wrap_payload=True の場合）
+        wrap_payload: True の場合は container 付きで送信、False で任意のpayloadを送信
+    """
+    if not _rakuraku_credentials_ready():
+        return _rakuraku_missing_credentials_message()
+    
+    return await _rakuraku_handle_update_tool(
+        post_type="posts",
+        post_id=post_id,
+        fields_json=fields_json,
+        container=container,
+        wrap_payload=wrap_payload,
+        label="posts",
+    )
 
 
 @mcp.tool()
