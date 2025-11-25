@@ -4,15 +4,16 @@
 import logging
 import asyncio
 import json
+import os
 import re
 from pathlib import Path
 from urllib.parse import urljoin, urlparse
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional, Tuple
 from bs4 import BeautifulSoup
 from bs4.element import Tag
 from mcp.server.fastmcp import FastMCP
 import aiohttp
-from aiohttp import ClientTimeout
+from aiohttp import ClientTimeout, BasicAuth
 
 # Playwrightのインポート
 try:
@@ -47,6 +48,186 @@ CLOUD_GYM_BASE_URL = "https://cloud-gym.com/personal-fitness"
 CLOUD_GYM_POST_TYPE = "introduce"
 CLOUD_GYM_API_ENDPOINT = f"{CLOUD_GYM_BASE_URL.rstrip('/')}/wp-json/wp/v2/{CLOUD_GYM_POST_TYPE}"
 CLOUD_GYM_DEFAULT_FIELDS = "id,title,excerpt,date,link,slug"
+
+# Rakuraku Media School settings
+RAKURAKU_SITE_URL = "https://rakuraku.app/media/school"
+RAKURAKU_POST_TYPE = "school-list"
+RAKURAKU_API_BASE = f"{RAKURAKU_SITE_URL.rstrip('/')}/wp-json/wp/v2"
+RAKURAKU_DEFAULT_FIELDS = "id,title,slug,date,link,status"
+RAKURAKU_WP_USERNAME = os.environ.get("RAKURAKU_WP_USERNAME", "rakuraku-admin-school")
+RAKURAKU_WP_APP_PASSWORD = os.environ.get("RAKURAKU_WP_APP_PASSWORD", "")
+
+
+def _rakuraku_credentials_ready() -> bool:
+    return bool(RAKURAKU_WP_USERNAME and RAKURAKU_WP_APP_PASSWORD)
+
+
+def _rakuraku_missing_credentials_message() -> str:
+    return (
+        "Rakuraku Media School のWordPress APIにアクセスするには、"
+        "環境変数 RAKURAKU_WP_USERNAME と RAKURAKU_WP_APP_PASSWORD を設定してください。"
+    )
+
+
+def _wp_extract_text(field: Any) -> str:
+    if isinstance(field, dict):
+        return field.get("rendered") or field.get("raw") or ""
+    if isinstance(field, list):
+        return ", ".join(str(item) for item in field if item not in (None, ""))
+    if field is None:
+        return ""
+    return str(field)
+
+
+def _flatten_field_value(value: Any) -> Any:
+    if isinstance(value, list):
+        if len(value) == 1:
+            return _flatten_field_value(value[0])
+        return [_flatten_field_value(v) for v in value]
+    if isinstance(value, dict):
+        return {k: _flatten_field_value(v) for k, v in value.items()}
+    return value
+
+
+def _rakuraku_collect_custom_fields(post: Dict[str, Any]) -> Dict[str, Any]:
+    fields: Dict[str, Any] = {}
+    for key in ("custom_fields", "meta", "acf"):
+        raw = post.get(key)
+        if isinstance(raw, dict):
+            for f_key, f_val in raw.items():
+                fields[f_key] = _flatten_field_value(f_val)
+    return fields
+
+
+def _truncate_value(value: Any, limit: int = 120) -> str:
+    text = _wp_extract_text(value) if isinstance(value, dict) else str(value)
+    text = text.strip()
+    if len(text) > limit:
+        return text[: limit - 3] + "..."
+    return text
+
+
+def _strip_html(html: str) -> str:
+    try:
+        soup = BeautifulSoup(html, "html.parser")
+        return soup.get_text(separator=" ", strip=True)
+    except Exception:
+        return html
+
+
+def _rakuraku_format_summary(post: Dict[str, Any], include_fields: bool = False) -> str:
+    title = _wp_extract_text(post.get("title"))
+    link = post.get("link", "")
+    post_id = post.get("id")
+    slug = post.get("slug", "")
+    status = post.get("status", "")
+    date_str = post.get("date", "")
+    
+    summary = [
+        "━━━━━━━━━━━━━━━━━━━━",
+        f"📍 {title or 'タイトル未設定'}",
+        f"🆔 ID: {post_id} / slug: {slug}",
+        f"📅 公開日: {date_str or 'N/A'} / status: {status or '不明'}",
+        f"🔗 {link or 'リンクなし'}",
+    ]
+    
+    if include_fields:
+        fields = _rakuraku_collect_custom_fields(post)
+        if fields:
+            preview_items = []
+            for key, value in list(fields.items())[:6]:
+                preview_items.append(f"{key}={_truncate_value(value, 60)}")
+            if preview_items:
+                summary.append("🔧 カスタムフィールド:")
+                summary.append("   " + ", ".join(preview_items))
+    
+    return "\n".join(summary)
+
+
+def _rakuraku_format_detail(post: Dict[str, Any]) -> str:
+    title = _wp_extract_text(post.get("title"))
+    summary = [
+        "━━━━━━━━━━━━━━━━━━━━",
+        f"📍 {title or 'タイトル未設定'}",
+        f"🆔 ID: {post.get('id')} / slug: {post.get('slug')}",
+        f"📅 公開日: {post.get('date')} / 最終更新: {post.get('modified')}",
+        f"👤 author: {post.get('author')}",
+        f"🔗 {post.get('link')}",
+        "━━━━━━━━━━━━━━━━━━━━",
+    ]
+    
+    content = post.get("content", {}).get("rendered")
+    if content:
+        stripped = _strip_html(content)
+        summary.append("📝 本文（冒頭200文字）:")
+        summary.append(_truncate_value(stripped, 200))
+    
+    excerpt = post.get("excerpt", {}).get("rendered")
+    if excerpt:
+        summary.append("\n💡 抜粋:")
+        summary.append(_truncate_value(_strip_html(excerpt), 160))
+    
+    fields = _rakuraku_collect_custom_fields(post)
+    if fields:
+        summary.append("\n🔧 カスタムフィールド一覧:")
+        for key, value in fields.items():
+            summary.append(f"- {key}: {_truncate_value(value)}")
+    else:
+        summary.append("\n🔧 カスタムフィールドは見つかりませんでした。")
+    
+    return "\n".join(summary)
+
+
+async def _rakuraku_wp_get(path: str, params: Optional[Dict[str, Any]] = None) -> Tuple[Any, Dict[str, str]]:
+    if not _rakuraku_credentials_ready():
+        raise RuntimeError(_rakuraku_missing_credentials_message())
+    
+    url = path
+    if not url.startswith("http"):
+        url = f"{RAKURAKU_API_BASE.rstrip('/')}/{path.lstrip('/')}"
+    
+    auth = BasicAuth(RAKURAKU_WP_USERNAME, RAKURAKU_WP_APP_PASSWORD)
+    timeout = ClientTimeout(total=30)
+    
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with session.get(url, params=params, auth=auth) as response:
+            try:
+                payload = await response.json(content_type=None)
+            except Exception:
+                payload = await response.text()
+            
+            if response.status >= 400:
+                error_details = payload if isinstance(payload, dict) else {"message": str(payload)}
+                raise RuntimeError(
+                    f"WordPress APIエラー (HTTP {response.status}): {json.dumps(error_details, ensure_ascii=False)}"
+                )
+            
+            headers = {k: v for k, v in response.headers.items()}
+            return payload, headers
+
+
+async def _rakuraku_find_post(identifier: str) -> Optional[Dict[str, Any]]:
+    params = {"context": "edit"}
+    
+    if identifier.isdigit():
+        path = f"{RAKURAKU_POST_TYPE}/{identifier}"
+        post, _ = await _rakuraku_wp_get(path, params=params)
+        if isinstance(post, dict):
+            return post
+        return None
+    
+    # slug or title search
+    slug_params = params | {"slug": identifier, "per_page": 1}
+    posts, _ = await _rakuraku_wp_get(RAKURAKU_POST_TYPE, params=slug_params)
+    if isinstance(posts, list) and posts:
+        return posts[0]
+    
+    search_params = params | {"search": identifier, "per_page": 1}
+    posts, _ = await _rakuraku_wp_get(RAKURAKU_POST_TYPE, params=search_params)
+    if isinstance(posts, list) and posts:
+        return posts[0]
+    
+    return None
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # MCPサーバー作成
@@ -1015,6 +1196,186 @@ async def extract_site_links_with_playwright(url: str) -> str:
                     await asyncio.sleep(1)
             except:
                 pass
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# Rakuraku Media School tools
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+@mcp.tool()
+async def rakuraku_school_list(
+    keyword: str = "",
+    per_page: int = 20,
+    page: int = 1,
+    include_custom_fields: bool = False,
+) -> str:
+    """
+    Rakuraku Media School の「school-list」カスタム投稿を検索・一覧表示します。
+    WordPress 管理画面（/wp-admin/edit.php?post_type=school-list）と同等の情報を取得できます。
+    
+    Args:
+        keyword: タイトル・本文・カスタムフィールドに対する検索語
+        per_page: 取得件数 (1-100)
+        page: ページ番号 (1以上)
+        include_custom_fields: True の場合はカスタムフィールドをプレビュー表示
+    """
+    logger.info(
+        "[Rakuraku] school-list 検索 keyword=%s, per_page=%s, page=%s",
+        keyword,
+        per_page,
+        page,
+    )
+    
+    if not _rakuraku_credentials_ready():
+        return _rakuraku_missing_credentials_message()
+    
+    per_page = max(1, min(per_page, 100))
+    page = max(1, page)
+    
+    params: Dict[str, Any] = {
+        "per_page": per_page,
+        "page": page,
+        "status": "publish",
+        "context": "edit",
+        "orderby": "date",
+        "order": "desc",
+    }
+    
+    if keyword:
+        params["search"] = keyword
+    if not include_custom_fields:
+        params["_fields"] = RAKURAKU_DEFAULT_FIELDS
+    
+    try:
+        posts, headers = await _rakuraku_wp_get(RAKURAKU_POST_TYPE, params=params)
+    except RuntimeError as exc:
+        logger.error("[Rakuraku] school-list 取得失敗: %s", exc)
+        return f"エラー: {exc}"
+    
+    if not isinstance(posts, list):
+        return "エラー: 予期しないレスポンス形式です。"
+    if not posts:
+        return "指定条件に一致する school-list 投稿は見つかりませんでした。"
+    
+    total_posts = headers.get("X-WP-Total", "unknown")
+    total_pages = headers.get("X-WP-TotalPages", "unknown")
+    
+    lines = [
+        f"📚 Rakuraku Media School school-list 投稿 ({len(posts)}件)",
+        f"   page {page}/{total_pages} / total posts: {total_posts}",
+        ""
+    ]
+    
+    for post in posts:
+        lines.append(_rakuraku_format_summary(post, include_fields=include_custom_fields))
+        lines.append("")
+    
+    return "\n".join(lines).strip()
+
+
+@mcp.tool()
+async def rakuraku_school_detail(identifier: str) -> str:
+    """
+    school-list 投稿を ID / slug / タイトルで特定し、全文とカスタムフィールドを取得します。
+    
+    Args:
+        identifier: 投稿ID（数値）、または slug / タイトルの一部
+    """
+    identifier = (identifier or "").strip()
+    if not identifier:
+        return "identifier を指定してください（ID, slug, タイトルの一部など）。"
+    
+    if not _rakuraku_credentials_ready():
+        return _rakuraku_missing_credentials_message()
+    
+    logger.info("[Rakuraku] school-list 詳細取得 identifier=%s", identifier)
+    
+    try:
+        post = await _rakuraku_find_post(identifier)
+    except RuntimeError as exc:
+        logger.error("[Rakuraku] school-list 詳細取得失敗: %s", exc)
+        return f"エラー: {exc}"
+    
+    if not post:
+        return f"identifier '{identifier}' に一致する school-list 投稿が見つかりませんでした。"
+    
+    return _rakuraku_format_detail(post)
+
+
+@mcp.tool()
+async def rakuraku_media_posts(
+    keyword: str = "",
+    category_id: int = 0,
+    status: str = "publish",
+    per_page: int = 20,
+    page: int = 1,
+    include_custom_fields: bool = False,
+) -> str:
+    """
+    Rakuraku Media School の通常投稿（/wp-admin/edit.php）を検索します。
+    
+    Args:
+        keyword: 検索語
+        category_id: カテゴリーID（0で無視）
+        status: 投稿ステータス (publish, draft, pending など)
+        per_page: 取得件数 (1-100)
+        page: ページ番号
+        include_custom_fields: カスタムフィールドをプレビュー表示するか
+    """
+    if not _rakuraku_credentials_ready():
+        return _rakuraku_missing_credentials_message()
+    
+    per_page = max(1, min(per_page, 100))
+    page = max(1, page)
+    status = status or "publish"
+    
+    params: Dict[str, Any] = {
+        "per_page": per_page,
+        "page": page,
+        "status": status,
+        "context": "edit",
+        "orderby": "date",
+        "order": "desc",
+    }
+    if keyword:
+        params["search"] = keyword
+    if category_id > 0:
+        params["categories"] = category_id
+    if not include_custom_fields:
+        params["_fields"] = RAKURAKU_DEFAULT_FIELDS
+    
+    logger.info(
+        "[Rakuraku] posts 検索 keyword=%s category=%s status=%s page=%s",
+        keyword,
+        category_id or "any",
+        status,
+        page,
+    )
+    
+    try:
+        posts, headers = await _rakuraku_wp_get("posts", params=params)
+    except RuntimeError as exc:
+        logger.error("[Rakuraku] posts 取得失敗: %s", exc)
+        return f"エラー: {exc}"
+    
+    if not isinstance(posts, list):
+        return "エラー: 予期しないレスポンス形式です。"
+    if not posts:
+        return "指定条件に一致する投稿が見つかりませんでした。"
+    
+    total_posts = headers.get("X-WP-Total", "unknown")
+    total_pages = headers.get("X-WP-TotalPages", "unknown")
+    
+    lines = [
+        f"📰 Rakuraku Media School 通常投稿 ({len(posts)}件)",
+        f"   page {page}/{total_pages} / total posts: {total_posts}",
+        ""
+    ]
+    for post in posts:
+        lines.append(_rakuraku_format_summary(post, include_fields=include_custom_fields))
+        lines.append("")
+    
+    return "\n".join(lines).strip()
 
 
 @mcp.tool()
