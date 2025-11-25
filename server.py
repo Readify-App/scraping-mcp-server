@@ -293,6 +293,49 @@ def _rakuraku_build_status_param(arg: Optional[str]) -> str:
     return ",".join(ordered_unique)
 
 
+def _rakuraku_normalize_single_status(status: Optional[str]) -> str:
+    value = (status or "").strip().lower()
+    if value in RAKURAKU_ALLOWED_STATUSES:
+        return value
+    return "draft"
+
+
+def _rakuraku_parse_fields_json(raw: str) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+    if not raw or not raw.strip():
+        return None, None
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        return None, f"❌ JSONの形式が正しくありません: {exc}"
+    if not isinstance(data, dict):
+        return None, "❌ JSONはオブジェクト（Key/Value形式）で指定してください。"
+    return data, None
+
+
+def _rakuraku_build_edit_url(post_id: Any) -> str:
+    try:
+        pid = int(post_id)
+    except Exception:
+        pid = post_id
+    return f"{RAKURAKU_SITE_URL.rstrip('/')}/wp-admin/post.php?post={pid}&action=edit"
+
+
+def _rakuraku_format_post_action_result(action: str, post: Dict[str, Any]) -> str:
+    title = _wp_extract_text(post.get("title")) or "(タイトル未設定)"
+    status = post.get("status", "unknown")
+    post_id = post.get("id")
+    link = post.get("link") or ""
+    edit_url = _rakuraku_build_edit_url(post_id) if post_id else "N/A"
+    lines = [
+        action,
+        f"🆔 ID: {post_id} / status: {status}",
+        f"📍 タイトル: {title}",
+        f"🔗 表示URL: {link or 'N/A'}",
+        f"✏️ 編集URL: {edit_url}",
+    ]
+    return "\n".join(lines)
+
+
 async def _rakuraku_handle_update_tool(
     *,
     post_type: str,
@@ -1428,6 +1471,97 @@ async def rakuraku_school_detail(identifier: str) -> str:
 
 
 @mcp.tool()
+async def rakuraku_create_school_post(
+    title: str,
+    content: str = "",
+    status: str = "draft",
+    fields_json: str = "",
+    excerpt: str = "",
+    slug: str = ""
+) -> str:
+    """
+    school-list カスタム投稿を新規作成します。
+    """
+    if not _rakuraku_credentials_ready():
+        return _rakuraku_missing_credentials_message()
+    
+    clean_title = (title or "").strip()
+    if not clean_title:
+        return "タイトルを指定してください。"
+    
+    payload: Dict[str, Any] = {
+        "title": clean_title,
+        "status": _rakuraku_normalize_single_status(status),
+    }
+    if content:
+        payload["content"] = content
+    if excerpt:
+        payload["excerpt"] = excerpt
+    if slug:
+        payload["slug"] = slug
+    
+    fields, error = _rakuraku_parse_fields_json(fields_json)
+    if error:
+        return error
+    if fields:
+        payload["meta"] = fields
+    
+    try:
+        post = await _rakuraku_wp_post(RAKURAKU_POST_TYPE, payload)
+    except RuntimeError as exc:
+        logger.error("[Rakuraku] school-list 作成失敗: %s", exc)
+        return f"❌ 作成に失敗しました。\n{exc}"
+    
+    return _rakuraku_format_post_action_result("✅ school-list 投稿を作成しました", post)
+
+
+@mcp.tool()
+async def rakuraku_update_school_post(
+    post_id: int,
+    title: str = "",
+    content: str = "",
+    status: str = "",
+    fields_json: str = "",
+    excerpt: str = "",
+    slug: str = ""
+) -> str:
+    """
+    school-list 投稿のタイトル / 本文 / ステータス / メタ情報を更新します。
+    """
+    if not _rakuraku_credentials_ready():
+        return _rakuraku_missing_credentials_message()
+    
+    payload: Dict[str, Any] = {}
+    if title:
+        payload["title"] = title
+    if content:
+        payload["content"] = content
+    if excerpt:
+        payload["excerpt"] = excerpt
+    if slug:
+        payload["slug"] = slug
+    if status:
+        payload["status"] = _rakuraku_normalize_single_status(status)
+    
+    fields, error = _rakuraku_parse_fields_json(fields_json)
+    if error:
+        return error
+    if fields:
+        payload.setdefault("meta", {}).update(fields)
+    
+    if not payload:
+        return "更新項目を1つ以上指定してください。"
+    
+    try:
+        post = await _rakuraku_wp_post(f"{RAKURAKU_POST_TYPE}/{post_id}", payload)
+    except RuntimeError as exc:
+        logger.error("[Rakuraku] school-list 更新失敗: %s", exc)
+        return f"❌ 更新に失敗しました。\n{exc}"
+    
+    return _rakuraku_format_post_action_result("✅ school-list 投稿を更新しました", post)
+
+
+@mcp.tool()
 async def rakuraku_media_posts(
     keyword: str = "",
     category_id: int = 0,
@@ -1501,6 +1635,97 @@ async def rakuraku_media_posts(
         lines.append("")
     
     return "\n".join(lines).strip()
+
+
+@mcp.tool()
+async def rakuraku_create_media_post(
+    title: str,
+    content: str = "",
+    status: str = "draft",
+    fields_json: str = "",
+    excerpt: str = "",
+    slug: str = ""
+) -> str:
+    """
+    通常投稿（post）を新規作成します。
+    """
+    if not _rakuraku_credentials_ready():
+        return _rakuraku_missing_credentials_message()
+    
+    clean_title = (title or "").strip()
+    if not clean_title:
+        return "タイトルを指定してください。"
+    
+    payload: Dict[str, Any] = {
+        "title": clean_title,
+        "status": _rakuraku_normalize_single_status(status),
+    }
+    if content:
+        payload["content"] = content
+    if excerpt:
+        payload["excerpt"] = excerpt
+    if slug:
+        payload["slug"] = slug
+    
+    fields, error = _rakuraku_parse_fields_json(fields_json)
+    if error:
+        return error
+    if fields:
+        payload["meta"] = fields
+    
+    try:
+        post = await _rakuraku_wp_post("posts", payload)
+    except RuntimeError as exc:
+        logger.error("[Rakuraku] posts 作成失敗: %s", exc)
+        return f"❌ 作成に失敗しました。\n{exc}"
+    
+    return _rakuraku_format_post_action_result("✅ 通常投稿を作成しました", post)
+
+
+@mcp.tool()
+async def rakuraku_update_media_post(
+    post_id: int,
+    title: str = "",
+    content: str = "",
+    status: str = "",
+    fields_json: str = "",
+    excerpt: str = "",
+    slug: str = ""
+) -> str:
+    """
+    通常投稿のタイトル / 本文 / ステータス / メタ情報を更新します。
+    """
+    if not _rakuraku_credentials_ready():
+        return _rakuraku_missing_credentials_message()
+    
+    payload: Dict[str, Any] = {}
+    if title:
+        payload["title"] = title
+    if content:
+        payload["content"] = content
+    if excerpt:
+        payload["excerpt"] = excerpt
+    if slug:
+        payload["slug"] = slug
+    if status:
+        payload["status"] = _rakuraku_normalize_single_status(status)
+    
+    fields, error = _rakuraku_parse_fields_json(fields_json)
+    if error:
+        return error
+    if fields:
+        payload.setdefault("meta", {}).update(fields)
+    
+    if not payload:
+        return "更新項目を1つ以上指定してください。"
+    
+    try:
+        post = await _rakuraku_wp_post(f"posts/{post_id}", payload)
+    except RuntimeError as exc:
+        logger.error("[Rakuraku] posts 更新失敗: %s", exc)
+        return f"❌ 更新に失敗しました。\n{exc}"
+    
+    return _rakuraku_format_post_action_result("✅ 通常投稿を更新しました", post)
 
 
 @mcp.tool()
