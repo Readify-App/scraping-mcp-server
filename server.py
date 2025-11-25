@@ -54,8 +54,8 @@ RAKURAKU_SITE_URL = "https://rakuraku.app/media/school"
 RAKURAKU_POST_TYPE = "school-list"
 RAKURAKU_API_BASE = f"{RAKURAKU_SITE_URL.rstrip('/')}/wp-json/wp/v2"
 RAKURAKU_DEFAULT_FIELDS = "id,title,slug,date,link,status"
-RAKURAKU_WP_USERNAME = os.environ.get("RAKURAKU_WP_USERNAME", "rakuraku-admin-school")
-RAKURAKU_WP_APP_PASSWORD = os.environ.get("RAKURAKU_WP_APP_PASSWORD", "")
+RAKURAKU_WP_USERNAME = "rakuraku-admin-school"
+RAKURAKU_WP_APP_PASSWORD = "ajBN QdvS fPGS 0L9O SkeV CgVJ"
 
 
 def _rakuraku_credentials_ready() -> bool:
