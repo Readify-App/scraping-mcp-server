@@ -74,17 +74,29 @@ echo -e "${YELLOW}[1/6] uv のインストール確認中...${NC}"
 if ! command -v uv &> /dev/null; then
     echo -e "${YELLOW}uv がインストールされていません。インストールします...${NC}"
     if curl -LsSf https://astral.sh/uv/install.sh | sh; then
-        export PATH="$HOME/.cargo/bin:$PATH"
+        UV_BIN_DIR=""
+        for candidate in "$HOME/.cargo/bin" "$HOME/.local/bin"; do
+            if [ -x "$candidate/uv" ]; then
+                UV_BIN_DIR="$candidate"
+                export PATH="$candidate:$PATH"
+                break
+            fi
+        done
         # PATHを確実に反映させるため、再度確認
         if command -v uv &> /dev/null; then
             echo -e "${GREEN}✓ uv をインストールしました${NC}"
         else
             # まだ見つからない場合は、シェルの設定ファイルに追加を促す
             echo -e "${YELLOW}uv がインストールされましたが、PATH に追加する必要があります${NC}"
-            echo -e "${YELLOW}以下のコマンドを実行してから、再度このスクリプトを実行してください:${NC}"
-            echo -e "  export PATH=\"\$HOME/.cargo/bin:\$PATH\""
-            echo -e "${YELLOW}または、~/.zshrc に以下を追加してください:${NC}"
-            echo -e "  export PATH=\"\$HOME/.cargo/bin:\$PATH\""
+            if [ -n "$UV_BIN_DIR" ]; then
+                echo -e "${YELLOW}以下のコマンドを実行してから、再度このスクリプトを実行してください:${NC}"
+                echo -e "  export PATH=\"${UV_BIN_DIR}:\$PATH\""
+                echo -e "${YELLOW}または、~/.zshrc に以下を追加してください:${NC}"
+                echo -e "  export PATH=\"${UV_BIN_DIR}:\$PATH\""
+            else
+                echo -e "${YELLOW}uv のインストール場所が自動検出できませんでした${NC}"
+                echo -e "${YELLOW}\$HOME/.cargo/bin や \$HOME/.local/bin にインストールされることが多いので、PATH を確認してください${NC}"
+            fi
             exit 1
         fi
     else
@@ -220,6 +232,8 @@ else
     # 通常のインストール場所を確認
     if [ -f "$HOME/.cargo/bin/uv" ]; then
         UV_PATH="$HOME/.cargo/bin/uv"
+    elif [ -f "$HOME/.local/bin/uv" ]; then
+        UV_PATH="$HOME/.local/bin/uv"
     else
         echo -e "${YELLOW}警告: uv のパスを自動検出できませんでした。'uv' を使用します${NC}"
         echo -e "${YELLOW}Claude Desktop の環境変数に PATH が設定されていることを確認してください${NC}"
