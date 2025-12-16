@@ -23,6 +23,18 @@ except ImportError:
     async_playwright = None
     PLAYWRIGHT_AVAILABLE = False
 
+# Google Sheets APIのインポート
+try:
+    from google.oauth2 import service_account
+    from googleapiclient.discovery import build
+    from googleapiclient.errors import HttpError
+    GOOGLE_SHEETS_AVAILABLE = True
+except ImportError:
+    service_account = None
+    build = None
+    HttpError = None
+    GOOGLE_SHEETS_AVAILABLE = False
+
 # ログファイルのパスを動的に決定（スクリプトのディレクトリに保存）
 _log_dir = Path(__file__).parent
 _log_file = _log_dir / 'debug.log'
@@ -54,8 +66,10 @@ RAKURAKU_SITE_URL = "https://rakuraku.app/media/school"
 RAKURAKU_POST_TYPE = "school-list"
 RAKURAKU_API_BASE = f"{RAKURAKU_SITE_URL.rstrip('/')}/wp-json/wp/v2"
 RAKURAKU_DEFAULT_FIELDS = "id,title,slug,date,link,status"
-RAKURAKU_WP_USERNAME = os.environ.get("RAKURAKU_WP_USERNAME", "rakuraku-admin-school")
-RAKURAKU_WP_APP_PASSWORD = os.environ.get("RAKURAKU_WP_APP_PASSWORD", "")
+RAKURAKU_WP_USERNAME = "rakuraku-admin-school"
+RAKURAKU_WP_APP_PASSWORD = "ajBN QdvS fPGS 0L9O SkeV CgVJ"
+RAKURAKU_FIELD_CONTAINERS = {"custom_fields", "meta", "acf"}
+RAKURAKU_ALLOWED_STATUSES = ["publish", "draft"]
 
 
 def _rakuraku_credentials_ready() -> bool:
@@ -207,7 +221,7 @@ async def _rakuraku_wp_get(path: str, params: Optional[Dict[str, Any]] = None) -
 
 
 async def _rakuraku_find_post(identifier: str) -> Optional[Dict[str, Any]]:
-    params = {"context": "edit"}
+    params = {"context": "edit", "status": ",".join(RAKURAKU_ALLOWED_STATUSES)}
     
     if identifier.isdigit():
         path = f"{RAKURAKU_POST_TYPE}/{identifier}"
@@ -228,6 +242,170 @@ async def _rakuraku_find_post(identifier: str) -> Optional[Dict[str, Any]]:
         return posts[0]
     
     return None
+
+
+async def _rakuraku_wp_post(path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    if not _rakuraku_credentials_ready():
+        raise RuntimeError(_rakuraku_missing_credentials_message())
+    
+    url = path
+    if not url.startswith("http"):
+        url = f"{RAKURAKU_API_BASE.rstrip('/')}/{path.lstrip('/')}"
+    
+    auth = BasicAuth(RAKURAKU_WP_USERNAME, RAKURAKU_WP_APP_PASSWORD)
+    timeout = ClientTimeout(total=30)
+    
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with session.post(url, json=payload, auth=auth) as response:
+            try:
+                payload_resp = await response.json(content_type=None)
+            except Exception:
+                payload_resp = await response.text()
+            
+            if response.status >= 400:
+                error_details = payload_resp if isinstance(payload_resp, dict) else {"message": str(payload_resp)}
+                raise RuntimeError(
+                    f"WordPress APIエラー (HTTP {response.status}): {json.dumps(error_details, ensure_ascii=False)}"
+                )
+            if isinstance(payload_resp, dict):
+                return payload_resp
+            raise RuntimeError("予期しないレスポンス形式です。JSONオブジェクトを受信できませんでした。")
+
+
+def _rakuraku_format_update_summary(
+    post: Dict[str, Any],
+    updated_fields: Dict[str, Any],
+    field_group: str
+) -> str:
+    title = _wp_extract_text(post.get("title"))
+    lines = [
+        "✅ 更新成功",
+        f"ID: {post.get('id')} / slug: {post.get('slug')}",
+        f"タイトル: {title or '(タイトル未設定)'}",
+        f"対象: {field_group}",
+        "",
+        "更新内容:"
+    ]
+    for key, value in updated_fields.items():
+        lines.append(f"  • {key}: {value}")
+    return "\n".join(lines)
+
+
+def _rakuraku_build_status_param(arg: Optional[str]) -> str:
+    tokens: List[str] = []
+    if arg:
+        tokens = [token.strip().lower() for token in arg.split(",") if token.strip()]
+    selected = [token for token in tokens if token in RAKURAKU_ALLOWED_STATUSES]
+    if not selected:
+        selected = RAKURAKU_ALLOWED_STATUSES.copy()
+    ordered_unique: List[str] = []
+    for status in selected:
+        if status not in ordered_unique:
+            ordered_unique.append(status)
+    return ",".join(ordered_unique)
+
+
+def _rakuraku_normalize_single_status(status: Optional[str]) -> str:
+    value = (status or "").strip().lower()
+    if value in RAKURAKU_ALLOWED_STATUSES:
+        return value
+    return "draft"
+
+
+def _rakuraku_parse_fields_json(raw: str) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+    if not raw or not raw.strip():
+        return None, None
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        return None, f"❌ JSONの形式が正しくありません: {exc}"
+    if not isinstance(data, dict):
+        return None, "❌ JSONはオブジェクト（Key/Value形式）で指定してください。"
+    return data, None
+
+
+def _rakuraku_build_edit_url(post_id: Any) -> str:
+    try:
+        pid = int(post_id)
+    except Exception:
+        pid = post_id
+    return f"{RAKURAKU_SITE_URL.rstrip('/')}/wp-admin/post.php?post={pid}&action=edit"
+
+
+def _rakuraku_format_post_action_result(action: str, post: Dict[str, Any]) -> str:
+    title = _wp_extract_text(post.get("title")) or "(タイトル未設定)"
+    status = post.get("status", "unknown")
+    post_id = post.get("id")
+    link = post.get("link") or ""
+    edit_url = _rakuraku_build_edit_url(post_id) if post_id else "N/A"
+    lines = [
+        action,
+        f"🆔 ID: {post_id} / status: {status}",
+        f"📍 タイトル: {title}",
+        f"🔗 表示URL: {link or 'N/A'}",
+        f"✏️ 編集URL: {edit_url}",
+    ]
+    return "\n".join(lines)
+
+
+async def _rakuraku_handle_update_tool(
+    *,
+    post_type: str,
+    post_id: int,
+    fields_json: str,
+    container: str,
+    wrap_payload: bool,
+    label: str
+) -> str:
+    try:
+        data = json.loads(fields_json)
+    except json.JSONDecodeError as exc:
+        return (
+            "❌ JSONの形式に問題があります。\n"
+            f"エラー: {exc}\n"
+            "例: {\"カスタムフィールド名\": \"値\"}"
+        )
+    
+    if not isinstance(data, dict) or not data:
+        return "❌ JSONはキーと値を持つオブジェクト形式で指定してください。"
+    
+    container = (container or "custom_fields").strip()
+    wrap_payload = bool(wrap_payload)
+    
+    if wrap_payload:
+        if container not in RAKURAKU_FIELD_CONTAINERS:
+            return (
+                f"❌ container='{container}' はサポートされていません。"
+                " 使用可能: custom_fields / meta / acf"
+            )
+        payload = {container: data}
+        summary_fields = data
+        field_group = f"{label}:{container}"
+    else:
+        payload = data
+        summary_fields = data
+        field_group = f"{label}:raw"
+    
+    logger.info(
+        "[Rakuraku] 更新開始 post_type=%s id=%s container=%s wrap=%s",
+        post_type,
+        post_id,
+        container,
+        wrap_payload,
+    )
+    
+    try:
+        post = await _rakuraku_wp_post(f"{post_type}/{post_id}", payload)
+    except RuntimeError as exc:
+        logger.error(
+            "[Rakuraku] 更新失敗 post_type=%s id=%s : %s",
+            post_type,
+            post_id,
+            exc,
+        )
+        return f"❌ 更新に失敗しました。\n{exc}"
+    
+    return _rakuraku_format_update_summary(post, summary_fields, field_group)
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # MCPサーバー作成
@@ -1207,6 +1385,7 @@ async def rakuraku_school_list(
     keyword: str = "",
     per_page: int = 20,
     page: int = 1,
+    status: str = "publish,draft",
     include_custom_fields: bool = False,
 ) -> str:
     """
@@ -1217,6 +1396,7 @@ async def rakuraku_school_list(
         keyword: タイトル・本文・カスタムフィールドに対する検索語
         per_page: 取得件数 (1-100)
         page: ページ番号 (1以上)
+        status: 取得する投稿ステータス（例: "publish", "draft", "publish,draft"）
         include_custom_fields: True の場合はカスタムフィールドをプレビュー表示
     """
     logger.info(
@@ -1235,7 +1415,7 @@ async def rakuraku_school_list(
     params: Dict[str, Any] = {
         "per_page": per_page,
         "page": page,
-        "status": "publish",
+        "status": _rakuraku_build_status_param(status),
         "context": "edit",
         "orderby": "date",
         "order": "desc",
@@ -1303,10 +1483,101 @@ async def rakuraku_school_detail(identifier: str) -> str:
 
 
 @mcp.tool()
+async def rakuraku_create_school_post(
+    title: str,
+    content: str = "",
+    status: str = "draft",
+    fields_json: str = "",
+    excerpt: str = "",
+    slug: str = ""
+) -> str:
+    """
+    school-list カスタム投稿を新規作成します。
+    """
+    if not _rakuraku_credentials_ready():
+        return _rakuraku_missing_credentials_message()
+    
+    clean_title = (title or "").strip()
+    if not clean_title:
+        return "タイトルを指定してください。"
+    
+    payload: Dict[str, Any] = {
+        "title": clean_title,
+        "status": _rakuraku_normalize_single_status(status),
+    }
+    if content:
+        payload["content"] = content
+    if excerpt:
+        payload["excerpt"] = excerpt
+    if slug:
+        payload["slug"] = slug
+    
+    fields, error = _rakuraku_parse_fields_json(fields_json)
+    if error:
+        return error
+    if fields:
+        payload["meta"] = fields
+    
+    try:
+        post = await _rakuraku_wp_post(RAKURAKU_POST_TYPE, payload)
+    except RuntimeError as exc:
+        logger.error("[Rakuraku] school-list 作成失敗: %s", exc)
+        return f"❌ 作成に失敗しました。\n{exc}"
+    
+    return _rakuraku_format_post_action_result("✅ school-list 投稿を作成しました", post)
+
+
+@mcp.tool()
+async def rakuraku_update_school_post(
+    post_id: int,
+    title: str = "",
+    content: str = "",
+    status: str = "",
+    fields_json: str = "",
+    excerpt: str = "",
+    slug: str = ""
+) -> str:
+    """
+    school-list 投稿のタイトル / 本文 / ステータス / メタ情報を更新します。
+    """
+    if not _rakuraku_credentials_ready():
+        return _rakuraku_missing_credentials_message()
+    
+    payload: Dict[str, Any] = {}
+    if title:
+        payload["title"] = title
+    if content:
+        payload["content"] = content
+    if excerpt:
+        payload["excerpt"] = excerpt
+    if slug:
+        payload["slug"] = slug
+    if status:
+        payload["status"] = _rakuraku_normalize_single_status(status)
+    
+    fields, error = _rakuraku_parse_fields_json(fields_json)
+    if error:
+        return error
+    if fields:
+        payload.setdefault("meta", {}).update(fields)
+    
+    if not payload:
+        return "更新項目を1つ以上指定してください。"
+    
+    try:
+        post = await _rakuraku_wp_post(f"{RAKURAKU_POST_TYPE}/{post_id}", payload)
+    except RuntimeError as exc:
+        logger.error("[Rakuraku] school-list 更新失敗: %s", exc)
+        return f"❌ 更新に失敗しました。\n{exc}"
+    
+    return _rakuraku_format_post_action_result("✅ school-list 投稿を更新しました", post)
+
+
+@mcp.tool()
 async def rakuraku_media_posts(
     keyword: str = "",
     category_id: int = 0,
-    status: str = "publish",
+    status: str = "publish,draft",
     per_page: int = 20,
     page: int = 1,
     include_custom_fields: bool = False,
@@ -1317,7 +1588,7 @@ async def rakuraku_media_posts(
     Args:
         keyword: 検索語
         category_id: カテゴリーID（0で無視）
-        status: 投稿ステータス (publish, draft, pending など)
+        status: 投稿ステータス（例: "publish", "draft", "publish,draft"）
         per_page: 取得件数 (1-100)
         page: ページ番号
         include_custom_fields: カスタムフィールドをプレビュー表示するか
@@ -1327,12 +1598,12 @@ async def rakuraku_media_posts(
     
     per_page = max(1, min(per_page, 100))
     page = max(1, page)
-    status = status or "publish"
+    status_param = _rakuraku_build_status_param(status)
     
     params: Dict[str, Any] = {
         "per_page": per_page,
         "page": page,
-        "status": status,
+        "status": status_param,
         "context": "edit",
         "orderby": "date",
         "order": "desc",
@@ -1348,7 +1619,7 @@ async def rakuraku_media_posts(
         "[Rakuraku] posts 検索 keyword=%s category=%s status=%s page=%s",
         keyword,
         category_id or "any",
-        status,
+        status_param,
         page,
     )
     
@@ -1376,6 +1647,155 @@ async def rakuraku_media_posts(
         lines.append("")
     
     return "\n".join(lines).strip()
+
+
+@mcp.tool()
+async def rakuraku_create_media_post(
+    title: str,
+    content: str = "",
+    status: str = "draft",
+    fields_json: str = "",
+    excerpt: str = "",
+    slug: str = ""
+) -> str:
+    """
+    通常投稿（post）を新規作成します。
+    """
+    if not _rakuraku_credentials_ready():
+        return _rakuraku_missing_credentials_message()
+    
+    clean_title = (title or "").strip()
+    if not clean_title:
+        return "タイトルを指定してください。"
+    
+    payload: Dict[str, Any] = {
+        "title": clean_title,
+        "status": _rakuraku_normalize_single_status(status),
+    }
+    if content:
+        payload["content"] = content
+    if excerpt:
+        payload["excerpt"] = excerpt
+    if slug:
+        payload["slug"] = slug
+    
+    fields, error = _rakuraku_parse_fields_json(fields_json)
+    if error:
+        return error
+    if fields:
+        payload["meta"] = fields
+    
+    try:
+        post = await _rakuraku_wp_post("posts", payload)
+    except RuntimeError as exc:
+        logger.error("[Rakuraku] posts 作成失敗: %s", exc)
+        return f"❌ 作成に失敗しました。\n{exc}"
+    
+    return _rakuraku_format_post_action_result("✅ 通常投稿を作成しました", post)
+
+
+@mcp.tool()
+async def rakuraku_update_media_post(
+    post_id: int,
+    title: str = "",
+    content: str = "",
+    status: str = "",
+    fields_json: str = "",
+    excerpt: str = "",
+    slug: str = ""
+) -> str:
+    """
+    通常投稿のタイトル / 本文 / ステータス / メタ情報を更新します。
+    """
+    if not _rakuraku_credentials_ready():
+        return _rakuraku_missing_credentials_message()
+    
+    payload: Dict[str, Any] = {}
+    if title:
+        payload["title"] = title
+    if content:
+        payload["content"] = content
+    if excerpt:
+        payload["excerpt"] = excerpt
+    if slug:
+        payload["slug"] = slug
+    if status:
+        payload["status"] = _rakuraku_normalize_single_status(status)
+    
+    fields, error = _rakuraku_parse_fields_json(fields_json)
+    if error:
+        return error
+    if fields:
+        payload.setdefault("meta", {}).update(fields)
+    
+    if not payload:
+        return "更新項目を1つ以上指定してください。"
+    
+    try:
+        post = await _rakuraku_wp_post(f"posts/{post_id}", payload)
+    except RuntimeError as exc:
+        logger.error("[Rakuraku] posts 更新失敗: %s", exc)
+        return f"❌ 更新に失敗しました。\n{exc}"
+    
+    return _rakuraku_format_post_action_result("✅ 通常投稿を更新しました", post)
+
+
+@mcp.tool()
+async def rakuraku_update_school_fields(
+    post_id: int,
+    fields_json: str,
+    container: str = "meta",
+    wrap_payload: bool = True,
+) -> str:
+    """
+    school-list 投稿のカスタムフィールド/メタ情報を更新します。
+    
+    Args:
+        post_id: 更新対象の投稿ID
+        fields_json: {"フィールド名": "値"} 形式のJSON文字列
+        container: custom_fields / meta / acf のいずれか（wrap_payload=True の場合）
+        wrap_payload: True で JSON を container 内に包んで送信、False で JSON をそのまま送信
+    """
+    if not _rakuraku_credentials_ready():
+        return _rakuraku_missing_credentials_message()
+    
+    return await _rakuraku_handle_update_tool(
+        post_type=RAKURAKU_POST_TYPE,
+        post_id=post_id,
+        fields_json=fields_json,
+        container=container,
+        wrap_payload=wrap_payload,
+        label=RAKURAKU_POST_TYPE,
+    )
+
+
+@mcp.tool()
+async def rakuraku_update_media_fields(
+    post_id: int,
+    fields_json: str,
+    container: str = "meta",
+    wrap_payload: bool = True,
+) -> str:
+    """
+    通常投稿（/wp-admin/edit.php）に対してカスタムフィールドやメタ情報を更新します。
+    
+    Args:
+        post_id: 投稿ID
+        fields_json: {"フィールド名": "値"} 形式のJSON文字列
+        container: custom_fields / meta / acf （wrap_payload=True の場合）
+        wrap_payload: True の場合は container 付きで送信、False で任意のpayloadを送信
+    """
+    if not _rakuraku_credentials_ready():
+        return _rakuraku_missing_credentials_message()
+    
+    return await _rakuraku_handle_update_tool(
+        post_type="posts",
+        post_id=post_id,
+        fields_json=fields_json,
+        container=container,
+        wrap_payload=wrap_payload,
+        label="posts",
+    )
 
 
 @mcp.tool()
@@ -1907,6 +2327,194 @@ https://corp.azure-collaboration.co.jp/media-personal-fitness/
             "success": False,
             "error": str(e),
             "region": region
+        }, ensure_ascii=False)
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# Google Sheets ツール
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+def _get_google_sheets_service():
+    """
+    Google Sheets APIのサービスオブジェクトを取得します。
+    認証情報JSONファイルは server.py と同じディレクトリに配置してください。
+    """
+    if not GOOGLE_SHEETS_AVAILABLE:
+        raise RuntimeError(
+            "Google Sheets API が利用できません。"
+            "以下のパッケージをインストールしてください: google-api-python-client, google-auth"
+        )
+    
+    # 認証情報のパスを取得（server.pyと同じディレクトリ）
+    creds_path = Path(__file__).parent / "braided-circuit-465415-m6-1cbbf338d9f0.json"
+    
+    if not creds_path.exists():
+        raise RuntimeError(
+            f"認証情報ファイルが見つかりません: {creds_path}"
+        )
+    
+    try:
+        # サービスアカウントの認証情報を読み込む
+        credentials = service_account.Credentials.from_service_account_file(
+            creds_path,
+            scopes=['https://www.googleapis.com/auth/spreadsheets.readonly']
+        )
+        
+        # Google Sheets APIのサービスオブジェクトを作成
+        service = build('sheets', 'v4', credentials=credentials)
+        return service
+    except Exception as e:
+        logger.exception(f"Google Sheets API認証エラー: {e}")
+        raise RuntimeError(f"Google Sheets APIの認証に失敗しました: {str(e)}")
+
+
+@mcp.tool()
+async def read_google_sheet(
+    spreadsheet_id: str,
+    range_name: str = "",
+    sheet_name: str = ""
+) -> str:
+    """
+    Googleスプレッドシートからデータを読み込みます。
+    
+    Args:
+        spreadsheet_id: スプレッドシートID（URLの /d/ と /edit の間の文字列）
+            例: "1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms"
+        range_name: 読み込む範囲（例: "A1:C10", "Sheet1!A1:Z100"）
+            空文字列の場合はシート全体を読み込みます
+        sheet_name: シート名（range_nameにシート名が含まれていない場合に使用）
+            例: "Sheet1"
+    
+    Returns:
+        スプレッドシートのデータをJSON形式で返します
+    """
+    logger.info(
+        f"read_google_sheet called with spreadsheet_id={spreadsheet_id}, "
+        f"range_name={range_name}, sheet_name={sheet_name}"
+    )
+    
+    if not GOOGLE_SHEETS_AVAILABLE:
+        return json.dumps({
+            "success": False,
+            "error": "google_sheets_unavailable",
+            "message": (
+                "Google Sheets API が利用できません。"
+                "以下のパッケージをインストールしてください: "
+                "google-api-python-client, google-auth"
+            )
+        }, ensure_ascii=False)
+    
+    try:
+        # サービスオブジェクトを取得
+        service = _get_google_sheets_service()
+        
+        # 範囲を構築
+        if range_name:
+            # range_nameにシート名が含まれているかチェック
+            if '!' in range_name:
+                full_range = range_name
+            elif sheet_name:
+                full_range = f"{sheet_name}!{range_name}"
+            else:
+                full_range = range_name
+        elif sheet_name:
+            full_range = sheet_name
+        else:
+            # 範囲が指定されていない場合は、最初のシート全体を読み込む
+            full_range = None
+        
+        # スプレッドシートのメタデータを取得（シート名の確認用）
+        spreadsheet_metadata = service.spreadsheets().get(
+            spreadsheetId=spreadsheet_id
+        ).execute()
+        
+        sheet_names = [sheet['properties']['title'] for sheet in spreadsheet_metadata.get('sheets', [])]
+        logger.info(f"Available sheets: {sheet_names}")
+        
+        # データを読み込む
+        if full_range:
+            result = service.spreadsheets().values().get(
+                spreadsheetId=spreadsheet_id,
+                range=full_range
+            ).execute()
+        else:
+            # 範囲が指定されていない場合は、最初のシート全体を読み込む
+            if sheet_names:
+                first_sheet = sheet_names[0]
+                result = service.spreadsheets().values().get(
+                    spreadsheetId=spreadsheet_id,
+                    range=first_sheet
+                ).execute()
+            else:
+                return json.dumps({
+                    "success": False,
+                    "error": "no_sheets",
+                    "message": "スプレッドシートにシートが見つかりませんでした。"
+                }, ensure_ascii=False)
+        
+        values = result.get('values', [])
+        
+        if not values:
+            return json.dumps({
+                "success": True,
+                "spreadsheet_id": spreadsheet_id,
+                "range": full_range or sheet_names[0] if sheet_names else "unknown",
+                "row_count": 0,
+                "data": [],
+                "message": "指定された範囲にデータがありません。"
+            }, ensure_ascii=False, indent=2)
+        
+        # データを整形
+        # 最初の行をヘッダーとして扱う
+        headers = values[0] if values else []
+        rows = values[1:] if len(values) > 1 else []
+        
+        # 辞書形式のデータに変換
+        data_rows = []
+        for row in rows:
+            row_dict = {}
+            for i, header in enumerate(headers):
+                row_dict[header] = row[i] if i < len(row) else ""
+            data_rows.append(row_dict)
+        
+        result_data = {
+            "success": True,
+            "spreadsheet_id": spreadsheet_id,
+            "range": full_range or sheet_names[0] if sheet_names else "unknown",
+            "sheet_names": sheet_names,
+            "row_count": len(values),
+            "header_count": len(headers),
+            "headers": headers,
+            "data": data_rows,
+            "raw_values": values  # 生データも含める
+        }
+        
+        logger.info(f"Successfully read {len(values)} rows from spreadsheet")
+        return json.dumps(result_data, ensure_ascii=False, indent=2)
+        
+    except HttpError as e:
+        error_details = json.loads(e.content.decode('utf-8'))
+        logger.error(f"Google Sheets API HTTPエラー: {error_details}")
+        return json.dumps({
+            "success": False,
+            "error": "api_error",
+            "status_code": e.resp.status,
+            "message": error_details.get('error', {}).get('message', str(e)),
+            "details": error_details
+        }, ensure_ascii=False, indent=2)
+    except RuntimeError as e:
+        logger.error(f"Google Sheets 認証エラー: {e}")
+        return json.dumps({
+            "success": False,
+            "error": "authentication_error",
+            "message": str(e)
+        }, ensure_ascii=False)
+    except Exception as e:
+        logger.exception(f"Error in read_google_sheet: {e}")
+        return json.dumps({
+            "success": False,
+            "error": "unexpected_error",
+            "message": f"予期しないエラーが発生しました: {str(e)}"
         }, ensure_ascii=False)
 
 

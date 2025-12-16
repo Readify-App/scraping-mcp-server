@@ -122,5 +122,10 @@ Thumbs.db
 debug.log
 *.log
 
+# Google Service Account credentials
+braided-circuit-465415-m6-1cbbf338d9f0.json
+*-credentials.json
+*service-account*.json
+
 # uv
 uv.lock

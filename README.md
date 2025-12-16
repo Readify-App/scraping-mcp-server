@@ -59,15 +59,26 @@ JavaScript/SPA/Reactサイトから動的にリンクを抽出します。
 
 ### 🚀 1コマンドインストール（推奨）
 
+> **⚠️ 重要:** Windowsユーザーは**必ず**PowerShellコマンドを使用してください。`curl`コマンドはWindowsでは標準で利用できないため、使用しないでください。
+
 #### macOS / Linux
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Readify-App/scraping-mcp-server/main/install.sh | bash
 ```
 
 #### Windows (PowerShell)
+**PowerShellを開いて**以下のコマンドを実行してください:
 ```powershell
 irm https://raw.githubusercontent.com/Readify-App/scraping-mcp-server/main/install.ps1 | iex
 ```
+
+> **注意:** 
+> - Windowsでは`curl`コマンドは使用できません。上記のPowerShellコマンド（`irm`）を使用してください。
+> - `irm`はPowerShell 3.0以降で利用可能です（Windows 8以降では標準で利用可能）。
+> - もし`irm`が使えない場合は、以下の代替コマンドを使用してください:
+>   ```powershell
+>   Invoke-WebRequest -Uri https://raw.githubusercontent.com/Readify-App/scraping-mcp-server/main/install.ps1 -UseBasicParsing | Invoke-Expression
+>   ```
 
 インストール後、**Claude Desktopを再起動**してください。
 
@@ -182,12 +193,14 @@ tail -f debug.log
 
 もう一度インストールスクリプトを実行してください:
 
+> **⚠️ 重要:** Windowsユーザーは**必ず**PowerShellコマンドを使用してください。
+
 **macOS / Linux:**
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Readify-App/scraping-mcp-server/main/install.sh | bash
 ```
 
-**Windows:**
+**Windows (PowerShell):**
 ```powershell
 irm https://raw.githubusercontent.com/Readify-App/scraping-mcp-server/main/install.ps1 | iex
 ```
