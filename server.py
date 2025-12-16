@@ -2337,7 +2337,10 @@ https://corp.azure-collaboration.co.jp/media-personal-fitness/
 def _get_google_sheets_service():
     """
     Google Sheets APIのサービスオブジェクトを取得します。
-    認証情報JSONファイルは server.py と同じディレクトリに配置してください。
+    認証情報JSONファイルは以下の順序で検索されます:
+    1. 環境変数 GOOGLE_APPLICATION_CREDENTIALS
+    2. server.py と同じディレクトリ
+    3. ホームディレクトリの mcp-servers/scraping-mcp-server/
     """
     if not GOOGLE_SHEETS_AVAILABLE:
         raise RuntimeError(
@@ -2345,12 +2348,42 @@ def _get_google_sheets_service():
             "以下のパッケージをインストールしてください: google-api-python-client, google-auth"
         )
     
-    # 認証情報のパスを取得（server.pyと同じディレクトリ）
-    creds_path = Path(__file__).parent / "braided-circuit-465415-m6-1cbbf338d9f0.json"
+    # 認証情報ファイル名
+    creds_filename = "braided-circuit-465415-m6-1cbbf338d9f0.json"
     
-    if not creds_path.exists():
+    # 検索パスのリスト
+    possible_paths = []
+    
+    # 1. 環境変数から取得
+    env_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
+    if env_path:
+        possible_paths.append(Path(env_path))
+    
+    # 2. server.pyと同じディレクトリ
+    possible_paths.append(Path(__file__).parent / creds_filename)
+    
+    # 3. ホームディレクトリの mcp-servers/scraping-mcp-server/
+    home_dir = Path.home()
+    possible_paths.append(home_dir / "mcp-servers" / "scraping-mcp-server" / creds_filename)
+    
+    # 4. 開発用: Desktop/02_開発/scraping-mcp-server/
+    desktop_path = home_dir / "Desktop" / "02_開発" / "scraping-mcp-server" / creds_filename
+    possible_paths.append(desktop_path)
+    
+    # 最初に見つかったパスを使用
+    creds_path = None
+    for path in possible_paths:
+        if path.exists():
+            creds_path = path
+            logger.info(f"認証情報ファイルを見つけました: {creds_path}")
+            break
+    
+    if not creds_path:
+        searched_paths = "\n".join([f"  - {p}" for p in possible_paths])
         raise RuntimeError(
-            f"認証情報ファイルが見つかりません: {creds_path}"
+            f"認証情報ファイルが見つかりません: {creds_filename}\n"
+            f"以下の場所を確認しました:\n{searched_paths}\n"
+            f"または環境変数 GOOGLE_APPLICATION_CREDENTIALS を設定してください。"
         )
     
     try:
