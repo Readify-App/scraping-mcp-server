@@ -58,18 +58,32 @@ if ! command -v git &> /dev/null; then
 fi
 
 # git が実際に動作するか確認（Xcode Command Line Tools の確認）
-if ! git --version &> /dev/null; then
-    echo -e "${RED}エラー: git コマンドが正常に動作しません${NC}"
-    if [[ "$OSTYPE" == "darwin"* ]]; then
-        echo -e "${YELLOW}Xcode Command Line Tools がインストールされていない可能性があります${NC}"
-        echo -e "${YELLOW}以下のコマンドでインストールしてください:${NC}"
+if [[ "$OSTYPE" == "darwin"* ]]; then
+    # macOS の場合、Xcode Command Line Tools のインストール状態を確認
+    if ! xcode-select -p &> /dev/null; then
+        echo -e "${RED}エラー: Xcode Command Line Tools がインストールされていません${NC}"
+        echo -e "${YELLOW}以下のコマンドでインストールを開始してください:${NC}"
         echo -e "  xcode-select --install"
-        echo -e "${YELLOW}インストールが完了したら、再度このスクリプトを実行してください${NC}"
-    else
+        echo -e "${YELLOW}インストールダイアログが表示されたら、「インストール」をクリックしてください${NC}"
+        echo -e "${YELLOW}インストールが完了したら（数分〜10分程度かかります）、再度このスクリプトを実行してください${NC}"
+        echo -e "${YELLOW}インストールの進行状況は、システム環境設定 > ソフトウェアアップデート で確認できます${NC}"
+        exit 1
+    fi
+    # git が実際に動作するか確認
+    if ! git --version &> /dev/null; then
+        echo -e "${RED}エラー: git コマンドが正常に動作しません${NC}"
+        echo -e "${YELLOW}Xcode Command Line Tools のインストールが完了していない可能性があります${NC}"
+        echo -e "${YELLOW}インストールが完了するまで待ってから、再度このスクリプトを実行してください${NC}"
+        exit 1
+    fi
+else
+    # Linux の場合
+    if ! git --version &> /dev/null; then
+        echo -e "${RED}エラー: git コマンドが正常に動作しません${NC}"
         echo -e "${YELLOW}git の再インストールを試してください:${NC}"
         echo -e "  sudo apt-get install --reinstall git"
+        exit 1
     fi
-    exit 1
 fi
 
 # ネットワーク接続の確認（オプション）
