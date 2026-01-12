@@ -57,6 +57,21 @@ if ! command -v git &> /dev/null; then
     exit 1
 fi
 
+# git が実際に動作するか確認（Xcode Command Line Tools の確認）
+if ! git --version &> /dev/null; then
+    echo -e "${RED}エラー: git コマンドが正常に動作しません${NC}"
+    if [[ "$OSTYPE" == "darwin"* ]]; then
+        echo -e "${YELLOW}Xcode Command Line Tools がインストールされていない可能性があります${NC}"
+        echo -e "${YELLOW}以下のコマンドでインストールしてください:${NC}"
+        echo -e "  xcode-select --install"
+        echo -e "${YELLOW}インストールが完了したら、再度このスクリプトを実行してください${NC}"
+    else
+        echo -e "${YELLOW}git の再インストールを試してください:${NC}"
+        echo -e "  sudo apt-get install --reinstall git"
+    fi
+    exit 1
+fi
+
 # ネットワーク接続の確認（オプション）
 echo -e "${YELLOW}ネットワーク接続を確認中...${NC}"
 if ! curl -s --max-time 5 https://github.com > /dev/null 2>&1; then
@@ -129,7 +144,9 @@ if [ -d "$INSTALL_DIR" ]; then
     rm -rf "$INSTALL_DIR"
 fi
 mkdir -p "$HOME/mcp-servers"
-if git clone "https://github.com/${GITHUB_USER}/${GITHUB_REPO}.git" "$INSTALL_DIR"; then
+GIT_ERROR_FILE=$(mktemp)
+if git clone "https://github.com/${GITHUB_USER}/${GITHUB_REPO}.git" "$INSTALL_DIR" 2>"$GIT_ERROR_FILE"; then
+    rm -f "$GIT_ERROR_FILE"
     cd "$INSTALL_DIR" || {
         echo -e "${RED}エラー: ダウンロードしたディレクトリに移動できませんでした${NC}"
         exit 1
@@ -137,7 +154,23 @@ if git clone "https://github.com/${GITHUB_USER}/${GITHUB_REPO}.git" "$INSTALL_DI
     echo -e "${GREEN}✓ ダウンロード完了${NC}"
 else
     echo -e "${RED}エラー: リポジトリのダウンロードに失敗しました${NC}"
-    echo -e "${YELLOW}インターネット接続を確認してください${NC}"
+    # エラー出力を表示
+    if [ -s "$GIT_ERROR_FILE" ]; then
+        echo -e "${YELLOW}エラー詳細:${NC}"
+        cat "$GIT_ERROR_FILE" | sed 's/^/  /'
+    fi
+    rm -f "$GIT_ERROR_FILE"
+    if [[ "$OSTYPE" == "darwin"* ]]; then
+        echo -e "${YELLOW}以下のいずれかの原因が考えられます:${NC}"
+        echo -e "  1. Xcode Command Line Tools がインストールされていない"
+        echo -e "     → 以下のコマンドでインストールしてください:"
+        echo -e "        xcode-select --install"
+        echo -e "     → インストールが完了したら、再度このスクリプトを実行してください"
+        echo -e "  2. インターネット接続の問題"
+        echo -e "     → インターネット接続を確認してください"
+    else
+        echo -e "${YELLOW}インターネット接続を確認してください${NC}"
+    fi
     exit 1
 fi
 
