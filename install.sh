@@ -62,11 +62,24 @@ if [[ "$OSTYPE" == "darwin"* ]]; then
     # macOS の場合、Xcode Command Line Tools のインストール状態を確認
     if ! xcode-select -p &> /dev/null; then
         echo -e "${RED}エラー: Xcode Command Line Tools がインストールされていません${NC}"
-        echo -e "${YELLOW}以下のコマンドでインストールを開始してください:${NC}"
-        echo -e "  xcode-select --install"
-        echo -e "${YELLOW}インストールダイアログが表示されたら、「インストール」をクリックしてください${NC}"
-        echo -e "${YELLOW}インストールが完了したら（数分〜10分程度かかります）、再度このスクリプトを実行してください${NC}"
-        echo -e "${YELLOW}インストールの進行状況は、システム環境設定 > ソフトウェアアップデート で確認できます${NC}"
+        echo ""
+        echo -e "${YELLOW}【インストール手順】${NC}"
+        echo -e "${YELLOW}1. 以下のコマンドでインストールを開始してください:${NC}"
+        echo -e "   ${BLUE}xcode-select --install${NC}"
+        echo ""
+        echo -e "${YELLOW}2. インストールダイアログが表示されたら、「インストール」をクリックしてください${NC}"
+        echo -e "${YELLOW}   ダイアログが表示されない場合:${NC}"
+        echo -e "${YELLOW}   - 他のウィンドウの後ろに隠れている可能性があります${NC}"
+        echo -e "${YELLOW}   - システム環境設定 > ソフトウェアアップデート を確認してください${NC}"
+        echo ""
+        echo -e "${YELLOW}3. インストールの進行状況を確認:${NC}"
+        echo -e "   ${BLUE}softwareupdate --list${NC}"
+        echo ""
+        echo -e "${YELLOW}4. インストールが完了したら（数分〜10分程度）、以下で確認:${NC}"
+        echo -e "   ${BLUE}xcode-select -p${NC}"
+        echo -e "   ${BLUE}git --version${NC}"
+        echo ""
+        echo -e "${YELLOW}5. 確認できたら、再度このスクリプトを実行してください${NC}"
         exit 1
     fi
     # git が実際に動作するか確認
